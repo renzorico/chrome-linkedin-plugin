@@ -112,16 +112,16 @@ function scrapeJobCard(card) {
 }
 
 /**
- * Auto-scrolls the job list sidebar to load all job cards.
+ * Scrolls the job list sidebar to ensure all 25 cards on the current page are rendered.
  */
-async function autoScrollJobList() {
+async function scrollCurrentPage() {
   const scrollContainer =
     document.querySelector(".jobs-search-results-list") ||
     document.querySelector(".scaffold-layout__list") ||
     document.querySelector('[class*="jobs-search-results"]');
 
   if (!scrollContainer) {
-    console.warn("[Scraper] Could not find scroll container, using window");
+    console.warn("[Scraper] Could not find scroll container");
     return;
   }
 
@@ -131,7 +131,7 @@ async function autoScrollJobList() {
 
   while (stableRounds < MAX_STABLE_ROUNDS) {
     scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    await sleep(1500);
+    await sleep(1000);
 
     const currentCount = getAllJobCards().length;
     if (currentCount === previousCount) {
@@ -141,14 +141,89 @@ async function autoScrollJobList() {
     }
     previousCount = currentCount;
 
-    // Click "See more jobs" button if present
+    // Click "See more jobs" button if present (infinite scroll variant)
     const seeMoreBtn =
       document.querySelector("button.infinite-scroller__show-more-button") ||
       document.querySelector('button[aria-label="See more jobs"]');
     if (seeMoreBtn) {
       seeMoreBtn.click();
-      await sleep(2000);
+      await sleep(1500);
     }
+  }
+}
+
+/**
+ * Returns the total number of pages from the pagination bar.
+ */
+function getTotalPages() {
+  const pageButtons = document.querySelectorAll(
+    '.artdeco-pagination__pages li button, .artdeco-pagination__pages li a'
+  );
+  let maxPage = 1;
+  for (const btn of pageButtons) {
+    const num = parseInt(btn.textContent.trim(), 10);
+    if (!isNaN(num) && num > maxPage) {
+      maxPage = num;
+    }
+  }
+  return maxPage;
+}
+
+/**
+ * Returns the current active page number.
+ */
+function getCurrentPage() {
+  const active = document.querySelector(
+    '.artdeco-pagination__pages li.active button, .artdeco-pagination__pages li button[aria-current="true"], .artdeco-pagination__pages li.selected button'
+  );
+  if (active) {
+    const num = parseInt(active.textContent.trim(), 10);
+    if (!isNaN(num)) return num;
+  }
+  return 1;
+}
+
+/**
+ * Navigates to a specific page by clicking the page button or next arrow.
+ * Returns true if navigation succeeded.
+ */
+async function goToPage(targetPage) {
+  // Try clicking the exact page number button
+  const pageButtons = document.querySelectorAll(
+    '.artdeco-pagination__pages li button, .artdeco-pagination__pages li a'
+  );
+  for (const btn of pageButtons) {
+    const num = parseInt(btn.textContent.trim(), 10);
+    if (num === targetPage) {
+      btn.click();
+      await sleep(2000);
+      // Wait for page content to update
+      await waitForJobCards();
+      return true;
+    }
+  }
+
+  // If exact page button not visible, try the "Next" button
+  const nextBtn =
+    document.querySelector('button[aria-label="View next page"]') ||
+    document.querySelector('.artdeco-pagination__button--next');
+  if (nextBtn && !nextBtn.disabled) {
+    nextBtn.click();
+    await sleep(2000);
+    await waitForJobCards();
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Waits until job cards appear on the page after navigation.
+ */
+async function waitForJobCards() {
+  for (let i = 0; i < 10; i++) {
+    if (getAllJobCards().length > 0) return;
+    await sleep(500);
   }
 }
 
@@ -355,21 +430,11 @@ function sleep(ms) {
 }
 
 /**
- * Main scraping function. Called from popup via message passing.
- * @param {boolean} fullMode - If true, fetches individual job details.
- * @param {function} onProgress - Callback for progress updates.
+ * Scrapes all job cards from the current page view.
  */
-async function scrapeJobs(fullMode, onProgress) {
-  onProgress({ stage: "scrolling", message: "Scrolling to load all jobs..." });
-
-  await autoScrollJobList();
-
+function scrapeCurrentPageCards(seenIds) {
   const cards = getAllJobCards();
-  onProgress({ stage: "parsing", message: `Found ${cards.length} job cards` });
-
   const jobs = [];
-  const seenIds = new Set();
-
   for (const card of cards) {
     const job = scrapeJobCard(card);
     if (job && !seenIds.has(job.jobId)) {
@@ -377,31 +442,86 @@ async function scrapeJobs(fullMode, onProgress) {
       jobs.push(job);
     }
   }
+  return jobs;
+}
+
+/**
+ * Main scraping function. Called from popup via message passing.
+ * Iterates through ALL pages of results.
+ * @param {boolean} fullMode - If true, fetches individual job details.
+ * @param {function} onProgress - Callback for progress updates.
+ */
+async function scrapeJobs(fullMode, onProgress) {
+  const allJobs = [];
+  const seenIds = new Set();
+  const totalPages = getTotalPages();
+  let currentPage = getCurrentPage();
+
+  onProgress({
+    stage: "scrolling",
+    message: `Page ${currentPage}/${totalPages} — scrolling to load cards...`,
+  });
+
+  // Scrape the first (current) page
+  await scrollCurrentPage();
+  const firstPageJobs = scrapeCurrentPageCards(seenIds);
+  allJobs.push(...firstPageJobs);
+
+  onProgress({
+    stage: "paging",
+    message: `Page ${currentPage}/${totalPages} — ${allJobs.length} jobs collected`,
+  });
+
+  // Navigate through remaining pages
+  while (currentPage < totalPages) {
+    const nextPage = currentPage + 1;
+    const navigated = await goToPage(nextPage);
+    if (!navigated) {
+      console.warn(`[Scraper] Could not navigate to page ${nextPage}, stopping pagination`);
+      break;
+    }
+
+    currentPage = nextPage;
+    onProgress({
+      stage: "scrolling",
+      message: `Page ${currentPage}/${totalPages} — scrolling to load cards...`,
+    });
+
+    await scrollCurrentPage();
+    const pageJobs = scrapeCurrentPageCards(seenIds);
+    allJobs.push(...pageJobs);
+
+    onProgress({
+      stage: "paging",
+      message: `Page ${currentPage}/${totalPages} — ${allJobs.length} jobs collected`,
+    });
+  }
 
   onProgress({
     stage: "parsed",
-    message: `Parsed ${jobs.length} unique jobs`,
-    total: jobs.length,
+    message: `Scraped ${allJobs.length} unique jobs across ${currentPage} pages`,
+    total: allJobs.length,
   });
 
-  if (fullMode && jobs.length > 0) {
+  // Full mode: fetch details for each job
+  if (fullMode && allJobs.length > 0) {
     onProgress({ stage: "fetching", message: "Fetching job details..." });
 
-    for (let i = 0; i < jobs.length; i++) {
-      const detail = await fetchJobDetail(jobs[i].jobId);
+    for (let i = 0; i < allJobs.length; i++) {
+      const detail = await fetchJobDetail(allJobs[i].jobId);
       if (detail) {
-        Object.assign(jobs[i], detail);
+        Object.assign(allJobs[i], detail);
       }
 
       onProgress({
         stage: "fetching",
-        message: `Fetching details: ${i + 1}/${jobs.length}`,
+        message: `Fetching details: ${i + 1}/${allJobs.length}`,
         current: i + 1,
-        total: jobs.length,
+        total: allJobs.length,
       });
 
       // Rate limiting — don't hammer the API
-      if (i < jobs.length - 1) {
+      if (i < allJobs.length - 1) {
         await sleep(300 + Math.random() * 200);
       }
     }
@@ -409,18 +529,18 @@ async function scrapeJobs(fullMode, onProgress) {
 
   // Build CSV
   const headerRow = CSV_HEADERS.join(",");
-  const dataRows = jobs.map(jobToCsvRow);
+  const dataRows = allJobs.map(jobToCsvRow);
   const csv = [headerRow, ...dataRows].join("\n");
 
-  downloadCsv(csv, jobs.length);
+  downloadCsv(csv, allJobs.length);
 
   onProgress({
     stage: "done",
-    message: `Done! Downloaded ${jobs.length} jobs.`,
-    total: jobs.length,
+    message: `Done! Downloaded ${allJobs.length} jobs across ${currentPage} pages.`,
+    total: allJobs.length,
   });
 
-  return jobs.length;
+  return allJobs.length;
 }
 
 // Listen for messages from the popup
