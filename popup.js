@@ -2,25 +2,7 @@ const scrapeBtn = document.getElementById("scrapeBtn");
 const statusEl = document.getElementById("status");
 const progressBar = document.getElementById("progressBar");
 const progressFill = document.getElementById("progressFill");
-const modeHint = document.getElementById("modeHint");
-const modeFast = document.getElementById("modeFast");
-const modeFull = document.getElementById("modeFull");
-
-const MODE_HINTS = {
-  fast: "Card-level data only. No descriptions or apply URLs.",
-  full: "Fetches full details for each job. Slower but complete.",
-};
-
-function getSelectedMode() {
-  return modeFull.checked ? "full" : "fast";
-}
-
-modeFast.addEventListener("change", () => {
-  modeHint.textContent = MODE_HINTS.fast;
-});
-modeFull.addEventListener("change", () => {
-  modeHint.textContent = MODE_HINTS.full;
-});
+const diagOutput = document.getElementById("diagOutput");
 
 // Listen for progress updates from content script
 chrome.runtime.onMessage.addListener((message) => {
@@ -42,12 +24,19 @@ chrome.runtime.onMessage.addListener((message) => {
         progressBar.style.display = "none";
       }, 2000);
     }
+
+    if (message.stage === "error") {
+      statusEl.className = "error";
+      scrapeBtn.disabled = false;
+      scrapeBtn.textContent = "Scrape Jobs";
+      progressBar.style.display = "none";
+
+      diagOutput.style.display = "none";
+    }
   }
 });
 
 scrapeBtn.addEventListener("click", async () => {
-  const mode = getSelectedMode();
-
   scrapeBtn.disabled = true;
   scrapeBtn.textContent = "Scraping...";
   statusEl.textContent = "Starting...";
@@ -71,7 +60,7 @@ scrapeBtn.addEventListener("click", async () => {
 
     chrome.tabs.sendMessage(
       tab.id,
-      { action: "scrape", mode },
+      { action: "scrape" },
       (response) => {
         if (chrome.runtime.lastError) {
           statusEl.textContent =
