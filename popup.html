@@ -5,24 +5,52 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      width: 300px;
+      width: 360px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       padding: 16px;
       background: #f3f2ef;
       color: #1d2226;
     }
     h1 {
-      font-size: 15px;
-      font-weight: 600;
-      margin-bottom: 4px;
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 2px;
       color: #0a66c2;
     }
-    .hint {
+    .subtitle {
       font-size: 11px;
       color: #666;
-      margin-bottom: 12px;
-      line-height: 1.4;
+      margin-bottom: 14px;
     }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 0;
+      margin-bottom: 14px;
+      border-bottom: 2px solid #ddd;
+    }
+    .tab {
+      flex: 1;
+      padding: 8px 0;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: #666;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: all 0.15s;
+    }
+    .tab:hover { color: #0a66c2; }
+    .tab.active {
+      color: #0a66c2;
+      border-bottom-color: #0a66c2;
+    }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* Scrape tab */
     #scrapeBtn {
       width: 100%;
       padding: 10px;
@@ -41,10 +69,11 @@
       cursor: not-allowed;
     }
     #status {
-      margin-top: 12px;
+      margin-top: 10px;
       font-size: 12px;
       color: #444;
       min-height: 18px;
+      line-height: 1.4;
     }
     .progress-bar {
       width: 100%;
@@ -64,18 +93,282 @@
     }
     .error { color: #cc1016; }
     .success { color: #057642; }
+
+    /* Filter stats */
+    .filter-stats {
+      margin-top: 10px;
+      font-size: 11px;
+      color: #555;
+      line-height: 1.6;
+      display: none;
+    }
+    .filter-stats .stat-row {
+      display: flex;
+      justify-content: space-between;
+    }
+    .filter-stats .stat-label { color: #666; }
+    .filter-stats .stat-value { font-weight: 600; }
+    .filter-stats .stat-total {
+      border-top: 1px solid #ddd;
+      padding-top: 4px;
+      margin-top: 4px;
+      font-weight: 600;
+      color: #057642;
+    }
+
+    /* Settings tab */
+    .section {
+      margin-bottom: 12px;
+    }
+    .section-header {
+      font-size: 12px;
+      font-weight: 600;
+      color: #333;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .section-header .toggle {
+      margin-left: auto;
+    }
+
+    /* Toggle switch */
+    .toggle {
+      position: relative;
+      width: 36px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+    .toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .toggle .slider {
+      position: absolute;
+      inset: 0;
+      background: #ccc;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .toggle .slider::before {
+      content: "";
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      left: 2px;
+      bottom: 2px;
+      background: white;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .toggle input:checked + .slider {
+      background: #0a66c2;
+    }
+    .toggle input:checked + .slider::before {
+      transform: translateX(16px);
+    }
+
+    /* Checkbox group */
+    .checkbox-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 8px;
+    }
+    .checkbox-group label {
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+    }
+    .checkbox-group input[type="checkbox"] {
+      width: 14px;
+      height: 14px;
+      accent-color: #0a66c2;
+    }
+
+    /* Tag input */
+    .tag-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 6px;
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      min-height: 32px;
+      cursor: text;
+    }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: #e8f0fe;
+      color: #0a66c2;
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .tag .remove {
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1;
+      color: #666;
+    }
+    .tag .remove:hover { color: #cc1016; }
+    .tag-input {
+      border: none;
+      outline: none;
+      font-size: 11px;
+      flex: 1;
+      min-width: 80px;
+      background: transparent;
+    }
+    .tag-hint {
+      font-size: 10px;
+      color: #999;
+      margin-top: 3px;
+    }
+
+    /* Number input */
+    .num-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+    }
+    .num-row input[type="number"] {
+      width: 50px;
+      padding: 4px 6px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 11px;
+      text-align: center;
+    }
+
+    /* Buttons */
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .btn-secondary {
+      flex: 1;
+      padding: 8px;
+      background: white;
+      color: #0a66c2;
+      border: 1px solid #0a66c2;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-secondary:hover { background: #e8f0fe; }
   </style>
 </head>
 <body>
-  <h1>LinkedIn Job Scraper</h1>
-  <div class="hint">Scrapes all pages. Fetches full JD text via API.</div>
+  <h1>Job Sift</h1>
+  <div class="subtitle">Scrape, filter, and export LinkedIn jobs</div>
 
-  <button id="scrapeBtn">Scrape Jobs</button>
+  <div class="tabs">
+    <div class="tab active" data-tab="scrape">Scrape</div>
+    <div class="tab" data-tab="filters">Filters</div>
+  </div>
 
-  <div id="status"></div>
-  <pre id="diagOutput" style="font-size:9px;max-height:200px;overflow:auto;margin-top:8px;background:#fff;padding:4px;border-radius:4px;display:none;white-space:pre-wrap;word-break:break-all;"></pre>
-  <div class="progress-bar" id="progressBar">
-    <div class="fill" id="progressFill"></div>
+  <!-- Scrape Tab -->
+  <div class="tab-content active" id="tab-scrape">
+    <button id="scrapeBtn">Sift Jobs</button>
+    <div id="status"></div>
+    <div class="progress-bar" id="progressBar">
+      <div class="fill" id="progressFill"></div>
+    </div>
+    <div class="filter-stats" id="filterStats"></div>
+  </div>
+
+  <!-- Filters Tab -->
+  <div class="tab-content" id="tab-filters">
+
+    <!-- Seniority -->
+    <div class="section">
+      <div class="section-header">
+        Seniority levels to include
+      </div>
+      <div class="checkbox-group" id="seniorityGroup">
+        <label><input type="checkbox" value="junior" checked> Junior</label>
+        <label><input type="checkbox" value="mid" checked> Mid</label>
+        <label><input type="checkbox" value="senior"> Senior</label>
+        <label><input type="checkbox" value="lead"> Lead</label>
+        <label><input type="checkbox" value="director"> Director+</label>
+      </div>
+    </div>
+
+    <!-- Work Arrangement -->
+    <div class="section">
+      <div class="section-header">
+        Work arrangement
+      </div>
+      <div class="checkbox-group" id="arrangementGroup">
+        <label><input type="checkbox" value="remote" checked> Remote</label>
+        <label><input type="checkbox" value="hybrid"> Hybrid</label>
+        <label><input type="checkbox" value="onsite"> On-site</label>
+        <label><input type="checkbox" value="unknown" checked> Unknown</label>
+      </div>
+    </div>
+
+    <!-- Role Keywords -->
+    <div class="section">
+      <div class="section-header">
+        Role keywords (match in title)
+      </div>
+      <div class="tag-container" id="roleKeywordsContainer">
+        <input class="tag-input" id="roleKeywordsInput" placeholder="Type and press Enter">
+      </div>
+      <div class="tag-hint">Press Enter to add, click x to remove</div>
+    </div>
+
+    <!-- Blocked Companies -->
+    <div class="section">
+      <div class="section-header">
+        Blocked companies
+      </div>
+      <div class="tag-container" id="blockedCompaniesContainer">
+        <input class="tag-input" id="blockedCompaniesInput" placeholder="Type and press Enter">
+      </div>
+      <div class="tag-hint">Jobs from these companies will be excluded</div>
+    </div>
+
+    <!-- Dedup & Cap -->
+    <div class="section">
+      <div class="section-header">
+        Deduplicate (same company + title)
+        <label class="toggle">
+          <input type="checkbox" id="dedupToggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">
+        Cap per company
+        <label class="toggle">
+          <input type="checkbox" id="capToggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="num-row" id="capRow">
+        <span>Max listings per company:</span>
+        <input type="number" id="capValue" value="5" min="1" max="50">
+      </div>
+    </div>
+
+    <!-- Save / Reset -->
+    <div class="btn-row">
+      <button class="btn-secondary" id="resetBtn">Reset defaults</button>
+    </div>
   </div>
 
   <script src="popup.js"></script>

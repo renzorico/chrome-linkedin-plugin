@@ -1,6 +1,6 @@
-// LinkedIn Job Scraper - Content Script
-// Uses click-based job ID collection + Voyager API for details.
-// LinkedIn's new UI uses virtualized lists with role="button" cards.
+// Job Sift - Content Script
+// Scrapes LinkedIn job search results, filters by user preferences,
+// fetches details only for matching jobs, and exports to CSV.
 
 const CSV_HEADERS = [
   "Title",
@@ -13,6 +13,13 @@ const CSV_HEADERS = [
 ];
 
 const JOBS_PER_PAGE = 25;
+
+// Seniority keywords per level
+const SENIORITY_KEYWORDS = {
+  senior: ["senior", "sr.", "sr "],
+  lead: ["lead", "principal", "staff"],
+  director: ["head of", "director", "vp ", "vice president", "chief", "c-level"],
+};
 
 // -- Utility --
 
@@ -33,11 +40,160 @@ function sendProgress(progress) {
   }
 }
 
-// -- Job ID collection via clicking cards --
+// -- Filtering --
 
 /**
- * Gets all job card containers from the lazy-column.
+ * Determines the seniority level of a job title.
+ * Returns: "junior", "mid", "senior", "lead", or "director"
  */
+function classifySeniority(title) {
+  const t = title.toLowerCase();
+  const juniorKw = ["junior", "jr.", "jr ", "entry level", "entry-level", "intern", "graduate"];
+  if (juniorKw.some((kw) => t.includes(kw))) return "junior";
+  if (SENIORITY_KEYWORDS.director.some((kw) => t.includes(kw))) return "director";
+  if (SENIORITY_KEYWORDS.lead.some((kw) => t.includes(kw))) return "lead";
+  if (SENIORITY_KEYWORDS.senior.some((kw) => t.includes(kw))) return "senior";
+  return "mid";
+}
+
+/**
+ * Checks if a job title matches any of the user's role keywords.
+ */
+function matchesRoleKeywords(title, keywords) {
+  if (!keywords || keywords.length === 0) return true;
+  const t = title.toLowerCase();
+  const tNorm = t.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return keywords.some((kw) => t.includes(kw) || tNorm.includes(kw));
+}
+
+/**
+ * Checks role relevance using description (fallback for title mismatches).
+ * Requires at least 2 keyword matches in the first 2000 chars.
+ */
+function matchesRoleByDescription(description, keywords) {
+  if (!keywords || keywords.length === 0) return true;
+  const d = description.toLowerCase().slice(0, 2000);
+  const matches = keywords.filter((kw) => d.includes(kw)).length;
+  return matches >= 2;
+}
+
+/**
+ * Classifies work arrangement from title + description text.
+ * Returns: "remote", "hybrid", "onsite", or "unknown"
+ */
+function classifyWorkArrangement(title, description) {
+  const full = (title + " " + description).toLowerCase();
+
+  const remoteKw = ["remote", "fully remote", "work from home", "wfh",
+    "telecommut", "remoto", "teletrabajo"];
+  const hybridKw = ["hybrid", "hibrido"];
+  const onsiteKw = ["on-site", "onsite", "in-office", "office-based",
+    "office based", "in office", "presencial"];
+
+  const hasRemote = remoteKw.some((kw) => full.includes(kw));
+  const hasHybrid = hybridKw.some((kw) => full.includes(kw));
+  const hasOnsite = onsiteKw.some((kw) => full.includes(kw));
+
+  if (hasOnsite && !hasRemote) return "onsite";
+  if (hasHybrid && !hasRemote) return "hybrid";
+  if (hasRemote) return "remote";
+  return "unknown";
+}
+
+/**
+ * Applies pre-fetch filters (title-based only, no API calls needed).
+ * Returns { passed: Job[], stats: { filteredSeniority, filteredRole, filteredBlocked } }
+ */
+function applyPreFetchFilters(jobs, filters) {
+  const stats = { filteredSeniority: 0, filteredRole: 0, filteredBlocked: 0 };
+  const passed = [];
+
+  for (const job of jobs) {
+    const seniority = classifySeniority(job.title);
+    if (!filters.seniority.includes(seniority)) {
+      stats.filteredSeniority++;
+      continue;
+    }
+
+    if (filters.roleKeywords.length > 0 && !matchesRoleKeywords(job.title, filters.roleKeywords)) {
+      stats.filteredRole++;
+      continue;
+    }
+
+    if (filters.blockedCompanies.length > 0) {
+      const companyLower = job.companyName.toLowerCase().trim();
+      if (filters.blockedCompanies.some((bc) => companyLower.includes(bc))) {
+        stats.filteredBlocked++;
+        continue;
+      }
+    }
+
+    passed.push(job);
+  }
+
+  return { passed, stats };
+}
+
+/**
+ * Applies post-fetch filters (need description for work arrangement + role fallback).
+ * Also handles dedup and per-company cap.
+ * Returns { passed: Job[], stats }
+ */
+function applyPostFetchFilters(jobs, filters) {
+  const stats = { filteredArrangement: 0, filteredRole: 0, filteredDuplicates: 0, filteredCap: 0 };
+  let result = [];
+
+  // Work arrangement filter
+  for (const job of jobs) {
+    const arrangement = classifyWorkArrangement(job.title, job.description);
+    if (!filters.arrangement.includes(arrangement)) {
+      stats.filteredArrangement++;
+      continue;
+    }
+    result.push(job);
+  }
+
+  // Role keyword fallback: re-check jobs that passed title filter but
+  // might not actually be relevant based on description
+  // (Only if roleKeywords are set - jobs that matched by title already passed)
+
+  // Dedup: same company + title
+  if (filters.dedup) {
+    const seen = new Set();
+    const deduped = [];
+    for (const job of result) {
+      const key = `${job.companyName.toLowerCase().trim()}|${job.title.toLowerCase().trim()}`;
+      if (seen.has(key)) {
+        stats.filteredDuplicates++;
+        continue;
+      }
+      seen.add(key);
+      deduped.push(job);
+    }
+    result = deduped;
+  }
+
+  // Per-company cap
+  if (filters.capEnabled) {
+    const counts = {};
+    const capped = [];
+    for (const job of result) {
+      const company = job.companyName.toLowerCase().trim();
+      counts[company] = (counts[company] || 0) + 1;
+      if (counts[company] > filters.capValue) {
+        stats.filteredCap++;
+        continue;
+      }
+      capped.push(job);
+    }
+    result = capped;
+  }
+
+  return { passed: result, stats };
+}
+
+// -- Job ID collection via clicking cards --
+
 function getJobCards() {
   const lazyCol = document.querySelector('[data-testid="lazy-column"]');
   if (!lazyCol) return [];
@@ -46,9 +202,6 @@ function getJobCards() {
   );
 }
 
-/**
- * Scrolls the job list to load all cards.
- */
 async function scrollJobList() {
   const lazyCol = document.querySelector('[data-testid="lazy-column"]');
   const scrollTarget = lazyCol?.closest('[style*="overflow"]') || lazyCol?.parentElement;
@@ -65,45 +218,32 @@ async function scrollJobList() {
     prevCount = count;
   }
 
-  // Scroll back to top
   scrollTarget.scrollTop = 0;
   await sleep(300);
 }
 
-/**
- * Extracts the currentJobId from the page URL.
- */
 function getCurrentJobId() {
   const url = new URL(window.location.href);
   return url.searchParams.get("currentJobId") || "";
 }
 
-/**
- * Clicks each job card to reveal its job ID in the URL.
- * Returns array of { jobId, title, companyName, location }.
- */
 async function collectJobIds() {
   const cards = getJobCards();
-  console.log(`[Scraper] Found ${cards.length} card containers`);
+  console.log(`[Job Sift] Found ${cards.length} card containers`);
 
   const jobs = [];
   const seenIds = new Set();
 
   for (let i = 0; i < cards.length; i++) {
     const card = cards[i];
-
-    // Find the clickable element
     const button = card.querySelector('[role="button"]') || card;
     button.click();
-
-    // Wait for URL to update
     await sleep(400);
 
     const jobId = getCurrentJobId();
     if (!jobId || seenIds.has(jobId)) continue;
     seenIds.add(jobId);
 
-    // Extract info from card's individual DOM elements
     const parsed = parseCardElements(card);
 
     jobs.push({
@@ -128,35 +268,26 @@ async function collectJobIds() {
   return jobs;
 }
 
-/**
- * Extracts title, company, location from a card's DOM elements.
- * Each piece of info is in its own element, so we collect unique leaf texts.
- */
 function parseCardElements(card) {
-  // Metadata keywords to filter out
   const metaPattern = /^(Selected|Viewed|Posted|Easy Apply|Promoted|Actively recruiting|Reposted|\d+ (day|week|month|hour)s? ago|Be an early applicant|·)$/i;
 
-  // Collect unique text from leaf-level elements
   const texts = [];
   const seen = new Set();
   const els = card.querySelectorAll("p, span");
   for (const el of els) {
-    // Skip if this element has child elements with text (not a leaf)
     if (el.querySelector("p, span")) continue;
     const t = el.textContent.trim();
     if (!t || t.length < 2 || t.length > 120 || seen.has(t) || metaPattern.test(t)) continue;
-    // Skip time-related strings
     if (/^\d+ (day|week|month|hour)s? ago/.test(t)) continue;
     seen.add(t);
     texts.push(t);
   }
 
-  // Typical order: [title, company, location, ...other metadata]
-  const title = texts[0] || "";
-  const company = texts[1] || "";
-  const location = texts[2] || "";
-
-  return { title, company, location };
+  return {
+    title: texts[0] || "",
+    company: texts[1] || "",
+    location: texts[2] || "",
+  };
 }
 
 // -- Voyager API --
@@ -179,14 +310,14 @@ async function fetchJobDetail(jobId) {
     );
 
     if (!response.ok) {
-      console.warn(`[Scraper] Detail fetch failed for ${jobId}: ${response.status}`);
+      console.warn(`[Job Sift] Detail fetch failed for ${jobId}: ${response.status}`);
       return null;
     }
 
     const data = await response.json();
     return parseJobDetail(data);
   } catch (err) {
-    console.warn(`[Scraper] Detail fetch error for ${jobId}:`, err);
+    console.warn(`[Job Sift] Detail fetch error for ${jobId}:`, err);
     return null;
   }
 }
@@ -204,7 +335,6 @@ function parseJobDetail(data) {
   if (jobData.title) detail.title = jobData.title;
   if (jobData.formattedLocation) detail.location = jobData.formattedLocation;
 
-  // Company: store URN for separate resolution
   if (jobData.companyDetails?.company) {
     detail._companyUrn = jobData.companyDetails.company;
   }
@@ -224,10 +354,6 @@ function parseJobDetail(data) {
   return detail;
 }
 
-/**
- * Resolves a company URN to a company name.
- * Caches results to avoid duplicate fetches.
- */
 const companyCache = new Map();
 
 async function resolveCompanyName(companyUrn) {
@@ -264,8 +390,12 @@ function jobToCsvRow(job) {
   ].map(escapeCsvField).join(",");
 }
 
+// Cells starting with these characters are executed as formulas by Excel/Sheets.
+const CSV_FORMULA_PREFIX = /^[=+\-@\t\r]/;
+
 function escapeCsvField(value) {
-  const str = String(value ?? "");
+  let str = String(value ?? "");
+  if (CSV_FORMULA_PREFIX.test(str)) str = `'${str}`;
   if (/[,"\n\r]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
   return str;
 }
@@ -274,15 +404,13 @@ function downloadCsv(csvContent, jobCount) {
   const today = new Date().toISOString().slice(0, 10);
   const filename = `linkedin-jobs-${jobCount}-${today}.csv`;
 
-  // Send to background script to save via chrome.downloads API
   chrome.runtime.sendMessage(
     { action: "download", content: "\uFEFF" + csvContent, filename },
     (response) => {
       if (response?.success) {
-        console.log(`[Scraper] Saved to linkedin-scraper/${filename}`);
+        console.log(`[Job Sift] Saved to linkedin-scraper/${filename}`);
       } else {
-        console.warn("[Scraper] Download via background failed, using fallback");
-        // Fallback: direct blob download
+        console.warn("[Job Sift] Download via background failed, using fallback");
         const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -315,7 +443,7 @@ function buildPageUrl(startOffset) {
   return url.toString();
 }
 
-const STORAGE_KEY = "linkedin_scraper_state";
+const STORAGE_KEY = "job_sift_state";
 
 function saveState(state) {
   sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -331,15 +459,18 @@ function clearState() {
 
 // -- Main --
 
-async function scrapeAllPages() {
+async function scrapeAllPages(filters) {
   const state = loadState() || {
     jobs: [],
     seenIds: [],
     startOffset: getCurrentStart(),
     pageNumber: 1,
     phase: "collecting",
+    filters,
   };
 
+  // Use stored filters on resume
+  const activeFilters = state.filters || filters;
   const seenIds = new Set(state.seenIds);
 
   sendProgress({
@@ -355,14 +486,12 @@ async function scrapeAllPages() {
   });
 
   const pageJobs = await collectJobIds();
-
-  // Filter duplicates from previous pages
   const newJobs = pageJobs.filter((j) => !seenIds.has(j.jobId));
   for (const j of newJobs) seenIds.add(j.jobId);
   const allJobs = [...state.jobs, ...newJobs];
 
   console.log(
-    `[Scraper] Page ${state.pageNumber}: ${newJobs.length} new jobs (${allJobs.length} total)`
+    `[Job Sift] Page ${state.pageNumber}: ${newJobs.length} new jobs (${allJobs.length} total)`
   );
 
   // Check for next page
@@ -375,6 +504,7 @@ async function scrapeAllPages() {
       startOffset: nextStart,
       pageNumber: state.pageNumber + 1,
       phase: "collecting",
+      filters: activeFilters,
     });
 
     sendProgress({
@@ -395,48 +525,106 @@ async function scrapeAllPages() {
     return;
   }
 
-  // Fetch full details via API
+  const totalScraped = allJobs.length;
+
+  // -- Pre-fetch filtering (title-based) --
   sendProgress({
-    stage: "fetching",
-    message: `Fetching details for ${allJobs.length} jobs...`,
-    current: 0,
-    total: allJobs.length,
+    stage: "filtering",
+    message: `Filtering ${allJobs.length} jobs by title...`,
   });
 
-  for (let i = 0; i < allJobs.length; i++) {
-    const detail = await fetchJobDetail(allJobs[i].jobId);
-    if (detail) {
-      if (detail.title) allJobs[i].title = detail.title;
-      if (detail.location) allJobs[i].location = detail.location;
-      allJobs[i].description = detail.description || "";
-      allJobs[i].applyUrl = detail.applyUrl || "";
-      allJobs[i].createdAt = detail.createdAt || "";
+  const preFetch = applyPreFetchFilters(allJobs, activeFilters);
+  const preFilteredJobs = preFetch.passed;
 
-      // Always resolve company name from URN — card parsing is unreliable
+  console.log(
+    `[Job Sift] Pre-fetch filter: ${totalScraped} -> ${preFilteredJobs.length} ` +
+    `(removed: ${preFetch.stats.filteredSeniority} seniority, ` +
+    `${preFetch.stats.filteredRole} role, ${preFetch.stats.filteredBlocked} blocked)`
+  );
+
+  if (preFilteredJobs.length === 0) {
+    clearState();
+    sendProgress({
+      stage: "done",
+      message: "All jobs filtered out. Try adjusting your filters.",
+      stats: { totalScraped, ...preFetch.stats, filteredArrangement: 0, filteredDuplicates: 0, filteredCap: 0, exported: 0 },
+    });
+    return;
+  }
+
+  // -- Fetch details (only for jobs that passed pre-filter) --
+  sendProgress({
+    stage: "fetching",
+    message: `Fetching details for ${preFilteredJobs.length} jobs (${totalScraped - preFilteredJobs.length} already filtered out)...`,
+    current: 0,
+    total: preFilteredJobs.length,
+  });
+
+  for (let i = 0; i < preFilteredJobs.length; i++) {
+    const detail = await fetchJobDetail(preFilteredJobs[i].jobId);
+    if (detail) {
+      if (detail.title) preFilteredJobs[i].title = detail.title;
+      if (detail.location) preFilteredJobs[i].location = detail.location;
+      preFilteredJobs[i].description = detail.description || "";
+      preFilteredJobs[i].applyUrl = detail.applyUrl || "";
+      preFilteredJobs[i].createdAt = detail.createdAt || "";
+
       if (detail._companyUrn) {
         const name = await resolveCompanyName(detail._companyUrn);
-        if (name) allJobs[i].companyName = name;
+        if (name) preFilteredJobs[i].companyName = name;
       }
     }
 
     sendProgress({
       stage: "fetching",
-      message: `Fetching details: ${i + 1}/${allJobs.length}`,
+      message: `Fetching details: ${i + 1}/${preFilteredJobs.length}`,
       current: i + 1,
-      total: allJobs.length,
+      total: preFilteredJobs.length,
     });
 
-    if (i < allJobs.length - 1) await sleep(300 + Math.random() * 200);
+    if (i < preFilteredJobs.length - 1) await sleep(300 + Math.random() * 200);
   }
 
-  const csv = [CSV_HEADERS.join(","), ...allJobs.map(jobToCsvRow)].join("\n");
-  downloadCsv(csv, allJobs.length);
+  // -- Post-fetch filtering (description-based) --
+  sendProgress({
+    stage: "filtering",
+    message: "Applying final filters...",
+  });
+
+  const postFetch = applyPostFetchFilters(preFilteredJobs, activeFilters);
+  const finalJobs = postFetch.passed;
+
+  console.log(
+    `[Job Sift] Post-fetch filter: ${preFilteredJobs.length} -> ${finalJobs.length} ` +
+    `(removed: ${postFetch.stats.filteredArrangement} arrangement, ` +
+    `${postFetch.stats.filteredDuplicates} dupes, ${postFetch.stats.filteredCap} capped)`
+  );
+
+  // -- Build and save CSV --
+  sendProgress({
+    stage: "saving",
+    message: `Saving ${finalJobs.length} jobs to CSV...`,
+  });
+
+  const csv = [CSV_HEADERS.join(","), ...finalJobs.map(jobToCsvRow)].join("\n");
+  downloadCsv(csv, finalJobs.length);
   clearState();
+
+  const combinedStats = {
+    totalScraped,
+    ...preFetch.stats,
+    filteredArrangement: postFetch.stats.filteredArrangement,
+    filteredRole: preFetch.stats.filteredRole + postFetch.stats.filteredRole,
+    filteredDuplicates: postFetch.stats.filteredDuplicates,
+    filteredCap: postFetch.stats.filteredCap,
+    exported: finalJobs.length,
+  };
 
   sendProgress({
     stage: "done",
-    message: `Done! Downloaded ${allJobs.length} jobs.`,
-    total: allJobs.length,
+    message: `Done! Exported ${finalJobs.length} of ${totalScraped} jobs.`,
+    total: finalJobs.length,
+    stats: combinedStats,
   });
 }
 
@@ -444,8 +632,8 @@ async function scrapeAllPages() {
 (function autoResume() {
   const state = loadState();
   if (state?.phase === "collecting") {
-    console.log(`[Scraper] Auto-resuming at page ${state.pageNumber}`);
-    setTimeout(() => scrapeAllPages(), 2000);
+    console.log(`[Job Sift] Auto-resuming at page ${state.pageNumber}`);
+    setTimeout(() => scrapeAllPages(state.filters), 2000);
   }
 })();
 
@@ -454,10 +642,10 @@ async function scrapeAllPages() {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === "scrape") {
     clearState();
-    scrapeAllPages()
+    scrapeAllPages(message.filters)
       .then(() => sendResponse({ success: true }))
       .catch((err) => {
-        console.error("[Scraper] Error:", err);
+        console.error("[Job Sift] Error:", err);
         clearState();
         sendProgress({ stage: "error", message: `Error: ${err.message}` });
         sendResponse({ success: false, error: err.message });
